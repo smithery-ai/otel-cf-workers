@@ -19,7 +19,6 @@
 		"check:format": "prettier . --check --ignore-unknown",
 		"check:types": "tsc --noEmit",
 		"watch": "tsc --watch",
-		"prepare": "husky",
 		"test": "vitest run",
 		"test:dev": "vitest",
 		"ci": "run-s -l clean build check"
