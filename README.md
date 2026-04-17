@@ -1,11 +1,17 @@
-# otel-cf-workers
+# @smithery/otel-cf-workers
 
-An OpenTelemetry compatible library for instrumenting and exporting traces from Cloudflare Workers.
+Smithery's fork of [`@microlabs/otel-cf-workers`](https://github.com/evanderkoogh/otel-cf-workers). Upstream is effectively unmaintained (last merged PR over a year old, 29 open issues without maintainer replies). This fork exists so Smithery projects can land fixes we depend on without waiting.
+
+**Fixes applied on top of upstream `1.0.0-rc.52`:**
+
+- `wrap()`'s `.bind` trap now honors `Function.prototype.bind` semantics. The upstream trap returned `() => receiver`, silently dropping the thisArg passed to `.bind`. This caused `TypeError: Illegal invocation` for any SDK that defensively calls `fetch.bind(globalThis)` (WorkOS `@workos-inc/node`, Stripe, etc.) — the SDK's globalThis binding was discarded, and later `this._fetchFn(...)` calls forwarded the caller's `this` to native fetch, which rejected it. See [upstream PR #215](https://github.com/evanderkoogh/otel-cf-workers/pull/215).
+
+Everything else is the upstream library — same API, same semantics. Drop-in replacement.
 
 ## Getting started
 
 ```bash
-npm install @microlabs/otel-cf-workers @opentelemetry/api
+npm install @smithery/otel-cf-workers @opentelemetry/api
 ```
 
 > [!IMPORTANT]
