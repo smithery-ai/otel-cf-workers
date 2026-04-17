@@ -47,9 +47,14 @@ export function isAlarm(trigger: Trigger): trigger is 'do-alarm' {
 }
 
 function findVersionMeta(): WorkerVersionMetadata | undefined {
+	// `env` is undefined outside the Workers runtime (e.g. vitest running
+	// without @cloudflare/vitest-pool-workers). Guard so this is a no-op
+	// there instead of throwing `Cannot convert undefined or null to object`.
+	if (!env || typeof env !== 'object') return undefined
 	return Object.values(env).find((binding: any) => {
 		return (
-			Object.getPrototypeOf(binding).constructor.name === 'Object' &&
+			binding != null &&
+			Object.getPrototypeOf(binding)?.constructor?.name === 'Object' &&
 			binding.id !== undefined &&
 			binding.tag !== undefined
 		)
@@ -57,7 +62,6 @@ function findVersionMeta(): WorkerVersionMetadata | undefined {
 }
 
 const createResource = (config: ResolvedTraceConfig, versionMeta?: WorkerVersionMetadata): Resource => {
-	console.log({ versionMeta })
 	const workerResourceAttrs = {
 		'cloud.provider': 'cloudflare',
 		'cloud.platform': 'cloudflare.workers',

@@ -2090,12 +2090,12 @@ function isAlarm(trigger) {
   return trigger === "do-alarm";
 }
 function findVersionMeta() {
+  if (!env || typeof env !== "object") return void 0;
   return Object.values(env).find((binding) => {
-    return Object.getPrototypeOf(binding).constructor.name === "Object" && binding.id !== void 0 && binding.tag !== void 0;
+    return binding != null && Object.getPrototypeOf(binding)?.constructor?.name === "Object" && binding.id !== void 0 && binding.tag !== void 0;
   });
 }
 var createResource = (config, versionMeta) => {
-  console.log({ versionMeta });
   const workerResourceAttrs = {
     "cloud.provider": "cloudflare",
     "cloud.platform": "cloudflare.workers",
