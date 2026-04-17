@@ -1,5 +1,5 @@
 {
-	"name": "@smithery/otel-cf-workers",
+	"name": "@microlabs/otel-cf-workers",
 	"version": "1.0.0",
 	"description": "Smithery fork of @microlabs/otel-cf-workers with the bind-trap thisArg fix (required for WorkOS, Stripe, and other SDKs that pre-bind globalThis.fetch).",
 	"module": "./dist/index.js",

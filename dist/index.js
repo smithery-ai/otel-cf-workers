@@ -106,14 +106,14 @@ function passthroughGet(target, prop, thisArg) {
 }
 
 // versions.json
-var _smithery_otel_cf_workers = "1.0.0";
+var _microlabs_otel_cf_workers = "1.0.0";
 var node = "22.17.0";
 
 // src/exporter.ts
 var defaultHeaders = {
   accept: "application/json",
   "content-type": "application/json",
-  "user-agent": `Cloudflare Worker @smithery/otel-cf-workers v${_smithery_otel_cf_workers}`
+  "user-agent": `Cloudflare Worker @microlabs/otel-cf-workers v${_microlabs_otel_cf_workers}`
 };
 var OTLPExporter = class {
   headers;
@@ -571,7 +571,7 @@ var SpanImpl = class {
   events = [];
   links;
   resource;
-  instrumentationScope = { name: "@smithery/otel-cf-workers" };
+  instrumentationScope = { name: "@microlabs/otel-cf-workers" };
   _ended = false;
   _droppedAttributesCount = 0;
   _droppedEventsCount = 0;
@@ -2102,8 +2102,8 @@ var createResource = (config, versionMeta) => {
     "cloud.region": "earth",
     "faas.max_memory": 134217728,
     "telemetry.sdk.language": "js",
-    "telemetry.sdk.name": "@smithery/otel-cf-workers",
-    "telemetry.sdk.version": _smithery_otel_cf_workers,
+    "telemetry.sdk.name": "@microlabs/otel-cf-workers",
+    "telemetry.sdk.version": _microlabs_otel_cf_workers,
     "telemetry.sdk.build.node_version": node,
     "cf.worker.version.id": versionMeta?.id,
     "cf.worker.version.tag": versionMeta?.tag,
