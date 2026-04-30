@@ -318,18 +318,18 @@ export function instrumentDOClass<C extends DOClass>(doClass: C, initialiser: In
 			const classStyle = doClass.prototype instanceof DurableObjectClass
 			const createDO = () => {
 				if (classStyle) {
-					// Pass the WRAPPED env (and state) to class-style DO
-					// constructors too. The CF `DurableObject` base stores
-					// these as the native `this.env` / `this.ctx`. Later
-					// method wrappers (instrumentFetchFn, instrumentAnyFn)
-					// `unwrap(thisArg)` to avoid recursive proxying — which
-					// strips any outer instance Proxy off `this`. So unless
-					// `this.env` is wrapped at the source (the constructor
-					// arg), env-binding instrumentation (env-proxy →
-					// stub-proxy → traceparent injection) silently no-ops
-					// inside every DO method body. Wrapping the env arg
-					// here is the only place that survives `unwrap`.
-					return new target(state, env)
+					// NOTE: this passes the RAW env to class-style DOs, which
+					// has a known consequence: `unwrap(thisArg)` in the method
+					// wrappers below strips the instance Proxy, so `this.env`
+					// inside method bodies is the raw env — env-binding
+					// instrumentation (env proxy → stub proxy → traceparent
+					// injection) silently no-ops on class-style DOs. The
+					// obvious fix (passing wrapped `env` here) currently
+					// breaks `agents`/`partyserver` users that iterate the
+					// env via `Object.entries`. Tracking: see the followup
+					// issue we filed against this repo for a Proxy-tolerant
+					// path forward.
+					return new target(orig_state, orig_env)
 				} else {
 					return new target(state, env)
 				}

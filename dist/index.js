@@ -2003,7 +2003,7 @@ function instrumentDOClass(doClass, initialiser) {
       const classStyle = doClass.prototype instanceof DurableObjectClass;
       const createDO = () => {
         if (classStyle) {
-          return new target(state, env2);
+          return new target(orig_state, orig_env);
         } else {
           return new target(state, env2);
         }
