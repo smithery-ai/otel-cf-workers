@@ -20,6 +20,56 @@ type FetchFn = DurableObject['fetch']
 type AlarmFn = DurableObject['alarm']
 type Env = Record<string, unknown>
 
+// Properties on `DurableObjectStub` that are NOT user RPC methods.
+// Accessing these never produces an RPC; we let them pass through
+// untouched so we don't accidentally wrap iterators/serializers.
+const STUB_NON_RPC_PROPS = new Set<string | symbol>([
+	'fetch',
+	'id',
+	'name',
+	'connect',
+	// Symbol.toPrimitive, Symbol.iterator, etc. — covered below by typeof check.
+])
+
+function instrumentRpcMethod(
+	fn: Function,
+	thisRef: DurableObjectStub,
+	nsName: string,
+	methodName: string,
+): Function {
+	return new Proxy(fn, {
+		apply(target, _thisArg, argArray) {
+			const tracer = trace.getTracer('@microlabs/otel-cf-workers')
+			const attrs = {
+				'do.namespace': nsName,
+				'do.id': thisRef.id.toString(),
+				'do.id.name': thisRef.id.name,
+				'rpc.system': 'cloudflare-do',
+				'rpc.service': nsName,
+				'rpc.method': methodName,
+			}
+			return tracer.startActiveSpan(
+				`Durable Object RPC ${nsName}.${methodName}`,
+				{ kind: SpanKind.CLIENT, attributes: attrs },
+				async (span) => {
+					try {
+						const result = Reflect.apply(target, thisRef, argArray)
+						const awaited = result instanceof Promise ? await result : result
+						span.setStatus({ code: SpanStatusCode.OK })
+						span.end()
+						return awaited
+					} catch (error) {
+						span.recordException(error as Exception)
+						span.setStatus({ code: SpanStatusCode.ERROR })
+						span.end()
+						throw error
+					}
+				},
+			)
+		},
+	}) as Function
+}
+
 function instrumentBindingStub(stub: DurableObjectStub, nsName: string): DurableObjectStub {
 	const stubHandler: ProxyHandler<typeof stub> = {
 		get(target, prop, receiver) {
@@ -32,9 +82,19 @@ function instrumentBindingStub(stub: DurableObjectStub, nsName: string): Durable
 					'do.id.name': target.id.name,
 				}
 				return instrumentClientFetch(fetcher, () => ({ includeTraceContext: true }), attrs)
-			} else {
+			}
+			// Non-RPC props (id, name, connect, internal symbols) pass through.
+			if (typeof prop === 'symbol' || STUB_NON_RPC_PROPS.has(prop)) {
 				return passthroughGet(target, prop, receiver)
 			}
+			// User-defined RPC method (only valid for class-style DOs that
+			// extend `DurableObject` from `cloudflare:workers`). Anything
+			// callable here is treated as RPC and emits a client span.
+			const value = Reflect.get(target, prop, receiver)
+			if (typeof value !== 'function') {
+				return value
+			}
+			return instrumentRpcMethod(value, target, nsName, String(prop))
 		},
 	}
 	return wrap(stub, stubHandler)
