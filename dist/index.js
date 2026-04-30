@@ -1806,12 +1806,6 @@ function instrumentRpcMethod(stub, nsName, methodName) {
 function instrumentBindingStub(stub, nsName) {
   const stubHandler = {
     get(target, prop, receiver) {
-      if (typeof prop === "string" && !STUB_NON_RPC_PROPS.has(prop) && prop !== "fetch") {
-        try {
-          trace10.getTracer("@microlabs/otel-cf-workers").startSpan(`stub-trap.${nsName}.${prop}`, { kind: SpanKind10.CLIENT }).end();
-        } catch {
-        }
-      }
       if (prop === "fetch") {
         const fetcher = Reflect.get(target, prop);
         const attrs = {

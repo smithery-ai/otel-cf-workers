@@ -91,17 +91,6 @@ function instrumentRpcMethod(
 function instrumentBindingStub(stub: DurableObjectStub, nsName: string): DurableObjectStub {
 	const stubHandler: ProxyHandler<typeof stub> = {
 		get(target, prop, receiver) {
-			// DEBUG instrumentation: trace every property access on a wrapped stub.
-			// Helps diagnose whether the wrap is even consulted for RPC calls.
-			if (typeof prop === 'string' && !STUB_NON_RPC_PROPS.has(prop) && prop !== 'fetch') {
-				try {
-					trace.getTracer('@microlabs/otel-cf-workers')
-						.startSpan(`stub-trap.${nsName}.${prop}`, { kind: SpanKind.CLIENT })
-						.end()
-				} catch {
-					// best-effort
-				}
-			}
 			if (prop === 'fetch') {
 				const fetcher = Reflect.get(target, prop)
 				const attrs = {
