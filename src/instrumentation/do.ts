@@ -330,47 +330,30 @@ export function instrumentDOClass<C extends DOClass>(doClass: C, initialiser: In
 			}
 			const doObj = api_context.with(context, createDO)
 
-			// Method wrappers below `unwrap(thisArg)` to avoid recursive
-			// proxying — which means inside any DO method body, `this` is
-			// the raw instance, NOT the outer Proxy returned by
-			// `instrumentDurableObject`. So `this.env` is read off the raw
-			// instance, where the framework's `super(ctx, env)` stored it
-			// raw. The instance-Proxy's `prop === 'env'` rewrite never gets
-			// consulted, and env-binding instrumentation (service /
-			// DurableObject / KV / D1 bindings, traceparent injection on
-			// outgoing fetches/RPCs) silently no-ops.
+			// KNOWN GAP for class-style DOs: method wrappers (instrumentFetchFn,
+			// instrumentAnyFn) `unwrap(thisArg)` to avoid recursive proxying,
+			// which strips the instance Proxy off `this`. Inside method
+			// bodies `this.env` is therefore the raw env (whatever
+			// `super(ctx, env)` stored in the base class), and the
+			// instance-Proxy's `prop === 'env'` redirect never fires. So
+			// env-binding instrumentation (service/DO/KV/D1 wrappers,
+			// traceparent injection on outgoing RPC) silently no-ops on
+			// class-style DOs.
 			//
-			// Fix: swap `this.env` on the RAW instance to the wrapped env
-			// AFTER the framework's constructor has finished its setup
-			// work (so anything Proxy-incompatible already ran against the
-			// raw env). All subsequent `this.env.X` reads — including from
-			// inside `unwrap`-stripped method bodies — see the wrapped env
-			// and benefit from full instrumentation.
+			// Two attempted fixes both broke compat:
+			//   1. Pass wrapped env to the class-style constructor →
+			//      breaks frameworks that do Proxy-incompatible work
+			//      (agents/partyserver: structured-clone, type checks).
+			//   2. Override `this.env` on the raw instance post-construction →
+			//      workerd refuses to serialize the proxied
+			//      DurableObjectNamespace across RPC ("Could not serialize
+			//      object of type DurableObject").
 			//
-			// Same for `this.ctx` (so storage/Web-sockets-API access goes
-			// through `instrumentState`).
-			if (classStyle) {
-				try {
-					Object.defineProperty(doObj, 'env', {
-						value: env,
-						writable: true,
-						configurable: true,
-						enumerable: true,
-					})
-					Object.defineProperty(doObj, 'ctx', {
-						value: state,
-						writable: true,
-						configurable: true,
-						enumerable: true,
-					})
-				} catch {
-					// best-effort — if the framework froze these descriptors
-					// we can't swap them. Falls back to the legacy behavior
-					// where the instance Proxy redirects, but only for
-					// non-`unwrap`-stripped accesses.
-				}
-			}
-
+			// Proper fix needs either CF runtime cooperation (a way to
+			// register an env wrapper that's transparent to workerd's
+			// serializer) or per-method binding-wrapping post-`unwrap`.
+			// Tracked in the smithery-ai fork; consumers needing per-method
+			// binding spans should wrap explicitly at the call site.
 			return instrumentDurableObject(doObj, initialiser, env, state, classStyle)
 		},
 	}
