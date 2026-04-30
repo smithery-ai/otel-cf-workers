@@ -5,8 +5,43 @@ Smithery's fork of [`@microlabs/otel-cf-workers`](https://github.com/evanderkoog
 **Fixes applied on top of upstream `1.0.0-rc.52`:**
 
 - `wrap()`'s `.bind` trap now honors `Function.prototype.bind` semantics. The upstream trap returned `() => receiver`, silently dropping the thisArg passed to `.bind`. This caused `TypeError: Illegal invocation` for any SDK that defensively calls `fetch.bind(globalThis)` (WorkOS `@workos-inc/node`, Stripe, etc.) — the SDK's globalThis binding was discarded, and later `this._fetchFn(...)` calls forwarded the caller's `this` to native fetch, which rejected it. See [upstream PR #215](https://github.com/evanderkoogh/otel-cf-workers/pull/215).
+- Client-side RPC instrumentation. `instrumentBindingStub` traps non-`fetch` callable property accesses on a `DurableObjectStub` and emits a `Durable Object RPC <ns>.<method>` client span on each `stub.<method>(...)` call. Lazy dispatch (resolves the method at call-time, not at outer-proxy `get` time) handles CF's stub-proxy synthesis correctly. **Note:** this only fires when the stub is consulted *through* the env-Proxy. See "Known gap" below for class-style DOs.
 
 Everything else is the upstream library — same API, same semantics. Drop-in replacement.
+
+## Known gap: env-binding instrumentation on class-style DOs
+
+**Symptom.** Inside any method body on a class-style Durable Object (one that `extends DurableObject` from `cloudflare:workers`, including everything built on the `agents` SDK and `partyserver`), `this.env.X.fetch(...)` and `this.env.X.<rpcMethod>(...)` are NOT traced. No `fetch POST` child span, no `Durable Object RPC` span, no `traceparent` injection. Spans whose parent should be the DO method's span land as roots in separate traces.
+
+**Root cause.** Two design decisions interact badly:
+
+1. The constructor-Proxy (`instrumentDOClass`, `src/instrumentation/do.ts:309-325`) passes the *raw, unwrapped* env to class-style DO constructors. `super(ctx, env)` in the framework base class stores the raw env on the native `this.env` slot.
+2. The method wrappers (`instrumentFetchFn`, `instrumentAnyFn`) call `target.bind(unwrap(thisArg))` (`do.ts:151,184`). `unwrap` strips the outer instance Proxy off `this`, so inside method bodies `this` is the raw underlying object.
+
+Together: `this.env` reads the raw env, never goes through `instrumentEnv`'s proxy, and binding-level instrumentation silently no-ops.
+
+This is wider than [upstream issue #177](https://github.com/evanderkoogh/otel-cf-workers/issues/177) — that issue was a downstream symptom. The gap affects every modern CF runtime that uses class-style DOs (the `agents` SDK, `partyserver`, every RPC-style DO shipped since CF added class-style RPC).
+
+**Two attempted fixes in this fork, both reverted:**
+
+| Attempt | Outcome |
+|---|---|
+| Pass wrapped `env` to the class-style constructor | Breaks frameworks whose constructors do Proxy-incompatible work (structured-clone, certain `Object.entries` patterns, internal type checks). `agents`/`partyserver` consumers fail with `durableObjectReset`. |
+| `Object.defineProperty(doObj, 'env', wrapped)` post-construction so `unwrap`'s raw `this` still sees a wrapped env | Construction works, but workerd's structured-clone serializer refuses to ferry the Proxy-wrapped `DurableObjectNamespace` across RPC: `"Could not serialize object of type DurableObject. This type does not support serialization."` |
+
+Both failure modes are documented inline at the createDO site in `src/instrumentation/do.ts` for whoever picks this up next.
+
+**Workarounds today.**
+
+- **Wrap at the call site.** If you control the DO consumer code, wrap `stub.<method>()` calls with your own `withSpan(...)` helper. Cheapest fix; gives you method-level RPC spans on the caller's trace tree. Used in [smithery-ai/cloud-claude](https://github.com/smithery-ai/cloud-claude) for its think runtime.
+- **Use `stub.fetch(...)` instead of RPC** where you can. `instrumentBindingStub`'s fetch path *is* on the env-Proxy chain and works correctly — it injects `traceparent` and emits a child span.
+
+**Proper solutions (open work).**
+
+- *Path A — runtime help:* Cloudflare exposes a hook for registering an env wrapper that's transparent to workerd's serializer. Would let either constructor-arg or post-construction wrapping work cleanly.
+- *Path B — per-method binding wrapping:* instead of relying on the env-Proxy chain inside method bodies, intercept binding access *inside* each method wrapper after `unwrap`, by re-wrapping `this.env` per call. Bigger refactor; needs careful compatibility testing across consumers (agents, partyserver, hono/effect, vanilla DOs, queue/scheduled/email triggers).
+
+If you hit this and have ideas, open an issue on this fork.
 
 ## Getting started
 
