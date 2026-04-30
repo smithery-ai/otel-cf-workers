@@ -1761,38 +1761,47 @@ var STUB_NON_RPC_PROPS = /* @__PURE__ */ new Set([
   "connect"
   // Symbol.toPrimitive, Symbol.iterator, etc. — covered below by typeof check.
 ]);
-function instrumentRpcMethod(fn, thisRef, nsName, methodName) {
-  return new Proxy(fn, {
-    apply(target, _thisArg, argArray) {
-      const tracer2 = trace10.getTracer("@microlabs/otel-cf-workers");
-      const attrs = {
-        "do.namespace": nsName,
-        "do.id": thisRef.id.toString(),
-        "do.id.name": thisRef.id.name,
-        "rpc.system": "cloudflare-do",
-        "rpc.service": nsName,
-        "rpc.method": methodName
-      };
-      return tracer2.startActiveSpan(
-        `Durable Object RPC ${nsName}.${methodName}`,
-        { kind: SpanKind10.CLIENT, attributes: attrs },
-        async (span) => {
-          try {
-            const result = Reflect.apply(target, thisRef, argArray);
-            const awaited = result instanceof Promise ? await result : result;
-            span.setStatus({ code: SpanStatusCode5.OK });
+function instrumentRpcMethod(stub, nsName, methodName) {
+  return (...argArray) => {
+    const tracer2 = trace10.getTracer("@microlabs/otel-cf-workers");
+    const attrs = {
+      "do.namespace": nsName,
+      "do.id": stub.id.toString(),
+      "do.id.name": stub.id.name,
+      "rpc.system": "cloudflare-do",
+      "rpc.service": nsName,
+      "rpc.method": methodName
+    };
+    return tracer2.startActiveSpan(
+      `Durable Object RPC ${nsName}.${methodName}`,
+      { kind: SpanKind10.CLIENT, attributes: attrs },
+      async (span) => {
+        try {
+          const fn = stub[methodName];
+          if (typeof fn !== "function") {
+            span.setStatus({
+              code: SpanStatusCode5.ERROR,
+              message: `RPC method "${methodName}" is not a function on stub`
+            });
             span.end();
-            return awaited;
-          } catch (error) {
-            span.recordException(error);
-            span.setStatus({ code: SpanStatusCode5.ERROR });
-            span.end();
-            throw error;
+            throw new TypeError(
+              `Durable Object stub for namespace "${nsName}" has no callable RPC method "${methodName}"`
+            );
           }
+          const result = fn.apply(stub, argArray);
+          const awaited = result instanceof Promise ? await result : result;
+          span.setStatus({ code: SpanStatusCode5.OK });
+          span.end();
+          return awaited;
+        } catch (error) {
+          span.recordException(error);
+          span.setStatus({ code: SpanStatusCode5.ERROR });
+          span.end();
+          throw error;
         }
-      );
-    }
-  });
+      }
+    );
+  };
 }
 function instrumentBindingStub(stub, nsName) {
   const stubHandler = {
@@ -1810,11 +1819,7 @@ function instrumentBindingStub(stub, nsName) {
       if (typeof prop === "symbol" || STUB_NON_RPC_PROPS.has(prop)) {
         return passthroughGet(target, prop, receiver);
       }
-      const value = Reflect.get(target, prop, receiver);
-      if (typeof value !== "function") {
-        return value;
-      }
-      return instrumentRpcMethod(value, target, nsName, String(prop));
+      return instrumentRpcMethod(target, nsName, String(prop));
     }
   };
   return wrap(stub, stubHandler);

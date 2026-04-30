@@ -31,43 +31,61 @@ const STUB_NON_RPC_PROPS = new Set<string | symbol>([
 	// Symbol.toPrimitive, Symbol.iterator, etc. — covered below by typeof check.
 ])
 
+// Return a function that, when called, dispatches the RPC by reading
+// the method off the underlying stub at call-time and applying it.
+// We do NOT probe the value at proxy `get` time because CF DO stubs
+// are themselves Proxies — user-defined RPC methods are not own
+// properties on the underlying target; they're synthesized on-demand
+// by CF's stub proxy. So `Reflect.get(target, 'someMethod')` returns
+// undefined, even though `target.someMethod(args)` works at call-time.
 function instrumentRpcMethod(
-	fn: Function,
-	thisRef: DurableObjectStub,
+	stub: DurableObjectStub,
 	nsName: string,
 	methodName: string,
-): Function {
-	return new Proxy(fn, {
-		apply(target, _thisArg, argArray) {
-			const tracer = trace.getTracer('@microlabs/otel-cf-workers')
-			const attrs = {
-				'do.namespace': nsName,
-				'do.id': thisRef.id.toString(),
-				'do.id.name': thisRef.id.name,
-				'rpc.system': 'cloudflare-do',
-				'rpc.service': nsName,
-				'rpc.method': methodName,
-			}
-			return tracer.startActiveSpan(
-				`Durable Object RPC ${nsName}.${methodName}`,
-				{ kind: SpanKind.CLIENT, attributes: attrs },
-				async (span) => {
-					try {
-						const result = Reflect.apply(target, thisRef, argArray)
-						const awaited = result instanceof Promise ? await result : result
-						span.setStatus({ code: SpanStatusCode.OK })
+): (...args: unknown[]) => unknown {
+	return (...argArray: unknown[]) => {
+		const tracer = trace.getTracer('@microlabs/otel-cf-workers')
+		const attrs = {
+			'do.namespace': nsName,
+			'do.id': stub.id.toString(),
+			'do.id.name': stub.id.name,
+			'rpc.system': 'cloudflare-do',
+			'rpc.service': nsName,
+			'rpc.method': methodName,
+		}
+		return tracer.startActiveSpan(
+			`Durable Object RPC ${nsName}.${methodName}`,
+			{ kind: SpanKind.CLIENT, attributes: attrs },
+			async (span) => {
+				try {
+					// Resolve the method on the underlying stub at call-time —
+					// CF's stub proxy synthesizes RPC method functions on
+					// access, so we must read it now, not at outer-proxy `get`.
+					const fn = (stub as unknown as Record<string, unknown>)[methodName]
+					if (typeof fn !== 'function') {
+						span.setStatus({
+							code: SpanStatusCode.ERROR,
+							message: `RPC method "${methodName}" is not a function on stub`,
+						})
 						span.end()
-						return awaited
-					} catch (error) {
-						span.recordException(error as Exception)
-						span.setStatus({ code: SpanStatusCode.ERROR })
-						span.end()
-						throw error
+						throw new TypeError(
+							`Durable Object stub for namespace "${nsName}" has no callable RPC method "${methodName}"`,
+						)
 					}
-				},
-			)
-		},
-	}) as Function
+					const result = (fn as (...a: unknown[]) => unknown).apply(stub, argArray)
+					const awaited = result instanceof Promise ? await result : result
+					span.setStatus({ code: SpanStatusCode.OK })
+					span.end()
+					return awaited
+				} catch (error) {
+					span.recordException(error as Exception)
+					span.setStatus({ code: SpanStatusCode.ERROR })
+					span.end()
+					throw error
+				}
+			},
+		)
+	}
 }
 
 function instrumentBindingStub(stub: DurableObjectStub, nsName: string): DurableObjectStub {
@@ -87,14 +105,11 @@ function instrumentBindingStub(stub: DurableObjectStub, nsName: string): Durable
 			if (typeof prop === 'symbol' || STUB_NON_RPC_PROPS.has(prop)) {
 				return passthroughGet(target, prop, receiver)
 			}
-			// User-defined RPC method (only valid for class-style DOs that
-			// extend `DurableObject` from `cloudflare:workers`). Anything
-			// callable here is treated as RPC and emits a client span.
-			const value = Reflect.get(target, prop, receiver)
-			if (typeof value !== 'function') {
-				return value
-			}
-			return instrumentRpcMethod(value, target, nsName, String(prop))
+			// Anything else: assume user-defined RPC method (valid only on
+			// class-style DOs / Worker Entrypoints). Return a wrapper that
+			// resolves and dispatches the call lazily so we work with CF's
+			// own-proxy stubs where the method doesn't exist as an own prop.
+			return instrumentRpcMethod(target, nsName, String(prop))
 		},
 	}
 	return wrap(stub, stubHandler)
