@@ -20,6 +20,74 @@ type FetchFn = DurableObject['fetch']
 type AlarmFn = DurableObject['alarm']
 type Env = Record<string, unknown>
 
+// Properties on `DurableObjectStub` that are NOT user RPC methods.
+// Accessing these never produces an RPC; we let them pass through
+// untouched so we don't accidentally wrap iterators/serializers.
+const STUB_NON_RPC_PROPS = new Set<string | symbol>([
+	'fetch',
+	'id',
+	'name',
+	'connect',
+	// Symbol.toPrimitive, Symbol.iterator, etc. — covered below by typeof check.
+])
+
+// Return a function that, when called, dispatches the RPC by reading
+// the method off the underlying stub at call-time and applying it.
+// We do NOT probe the value at proxy `get` time because CF DO stubs
+// are themselves Proxies — user-defined RPC methods are not own
+// properties on the underlying target; they're synthesized on-demand
+// by CF's stub proxy. So `Reflect.get(target, 'someMethod')` returns
+// undefined, even though `target.someMethod(args)` works at call-time.
+function instrumentRpcMethod(
+	stub: DurableObjectStub,
+	nsName: string,
+	methodName: string,
+): (...args: unknown[]) => unknown {
+	return (...argArray: unknown[]) => {
+		const tracer = trace.getTracer('@microlabs/otel-cf-workers')
+		const attrs = {
+			'do.namespace': nsName,
+			'do.id': stub.id.toString(),
+			'do.id.name': stub.id.name,
+			'rpc.system': 'cloudflare-do',
+			'rpc.service': nsName,
+			'rpc.method': methodName,
+		}
+		return tracer.startActiveSpan(
+			`Durable Object RPC ${nsName}.${methodName}`,
+			{ kind: SpanKind.CLIENT, attributes: attrs },
+			async (span) => {
+				try {
+					// Resolve the method on the underlying stub at call-time —
+					// CF's stub proxy synthesizes RPC method functions on
+					// access, so we must read it now, not at outer-proxy `get`.
+					const fn = (stub as unknown as Record<string, unknown>)[methodName]
+					if (typeof fn !== 'function') {
+						span.setStatus({
+							code: SpanStatusCode.ERROR,
+							message: `RPC method "${methodName}" is not a function on stub`,
+						})
+						span.end()
+						throw new TypeError(
+							`Durable Object stub for namespace "${nsName}" has no callable RPC method "${methodName}"`,
+						)
+					}
+					const result = (fn as (...a: unknown[]) => unknown).apply(stub, argArray)
+					const awaited = result instanceof Promise ? await result : result
+					span.setStatus({ code: SpanStatusCode.OK })
+					span.end()
+					return awaited
+				} catch (error) {
+					span.recordException(error as Exception)
+					span.setStatus({ code: SpanStatusCode.ERROR })
+					span.end()
+					throw error
+				}
+			},
+		)
+	}
+}
+
 function instrumentBindingStub(stub: DurableObjectStub, nsName: string): DurableObjectStub {
 	const stubHandler: ProxyHandler<typeof stub> = {
 		get(target, prop, receiver) {
@@ -32,9 +100,16 @@ function instrumentBindingStub(stub: DurableObjectStub, nsName: string): Durable
 					'do.id.name': target.id.name,
 				}
 				return instrumentClientFetch(fetcher, () => ({ includeTraceContext: true }), attrs)
-			} else {
+			}
+			// Non-RPC props (id, name, connect, internal symbols) pass through.
+			if (typeof prop === 'symbol' || STUB_NON_RPC_PROPS.has(prop)) {
 				return passthroughGet(target, prop, receiver)
 			}
+			// Anything else: assume user-defined RPC method (valid only on
+			// class-style DOs / Worker Entrypoints). Return a wrapper that
+			// resolves and dispatches the call lazily so we work with CF's
+			// own-proxy stubs where the method doesn't exist as an own prop.
+			return instrumentRpcMethod(target, nsName, String(prop))
 		},
 	}
 	return wrap(stub, stubHandler)
@@ -243,6 +318,11 @@ export function instrumentDOClass<C extends DOClass>(doClass: C, initialiser: In
 			const classStyle = doClass.prototype instanceof DurableObjectClass
 			const createDO = () => {
 				if (classStyle) {
+					// Class-style DOs receive the RAW env so framework
+					// constructors (agents/partyserver) that do
+					// Proxy-incompatible work (structured-clone, certain
+					// `Object.entries` patterns, internal type checks) see
+					// the bindings as the runtime delivered them.
 					return new target(orig_state, orig_env)
 				} else {
 					return new target(state, env)
@@ -250,6 +330,30 @@ export function instrumentDOClass<C extends DOClass>(doClass: C, initialiser: In
 			}
 			const doObj = api_context.with(context, createDO)
 
+			// KNOWN GAP for class-style DOs: method wrappers (instrumentFetchFn,
+			// instrumentAnyFn) `unwrap(thisArg)` to avoid recursive proxying,
+			// which strips the instance Proxy off `this`. Inside method
+			// bodies `this.env` is therefore the raw env (whatever
+			// `super(ctx, env)` stored in the base class), and the
+			// instance-Proxy's `prop === 'env'` redirect never fires. So
+			// env-binding instrumentation (service/DO/KV/D1 wrappers,
+			// traceparent injection on outgoing RPC) silently no-ops on
+			// class-style DOs.
+			//
+			// Two attempted fixes both broke compat:
+			//   1. Pass wrapped env to the class-style constructor →
+			//      breaks frameworks that do Proxy-incompatible work
+			//      (agents/partyserver: structured-clone, type checks).
+			//   2. Override `this.env` on the raw instance post-construction →
+			//      workerd refuses to serialize the proxied
+			//      DurableObjectNamespace across RPC ("Could not serialize
+			//      object of type DurableObject").
+			//
+			// Proper fix needs either CF runtime cooperation (a way to
+			// register an env wrapper that's transparent to workerd's
+			// serializer) or per-method binding-wrapping post-`unwrap`.
+			// Tracked in the smithery-ai fork; consumers needing per-method
+			// binding spans should wrap explicitly at the call site.
 			return instrumentDurableObject(doObj, initialiser, env, state, classStyle)
 		},
 	}
