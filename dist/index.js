@@ -2009,6 +2009,23 @@ function instrumentDOClass(doClass, initialiser) {
         }
       };
       const doObj = api_context3.with(context3, createDO);
+      if (classStyle) {
+        try {
+          Object.defineProperty(doObj, "env", {
+            value: env2,
+            writable: true,
+            configurable: true,
+            enumerable: true
+          });
+          Object.defineProperty(doObj, "ctx", {
+            value: state,
+            writable: true,
+            configurable: true,
+            enumerable: true
+          });
+        } catch {
+        }
+      }
       return instrumentDurableObject(doObj, initialiser, env2, state, classStyle);
     }
   };

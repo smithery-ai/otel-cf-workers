@@ -318,23 +318,58 @@ export function instrumentDOClass<C extends DOClass>(doClass: C, initialiser: In
 			const classStyle = doClass.prototype instanceof DurableObjectClass
 			const createDO = () => {
 				if (classStyle) {
-					// NOTE: this passes the RAW env to class-style DOs, which
-					// has a known consequence: `unwrap(thisArg)` in the method
-					// wrappers below strips the instance Proxy, so `this.env`
-					// inside method bodies is the raw env — env-binding
-					// instrumentation (env proxy → stub proxy → traceparent
-					// injection) silently no-ops on class-style DOs. The
-					// obvious fix (passing wrapped `env` here) currently
-					// breaks `agents`/`partyserver` users that iterate the
-					// env via `Object.entries`. Tracking: see the followup
-					// issue we filed against this repo for a Proxy-tolerant
-					// path forward.
+					// Class-style DOs receive the RAW env so framework
+					// constructors (agents/partyserver) that do
+					// Proxy-incompatible work (structured-clone, certain
+					// `Object.entries` patterns, internal type checks) see
+					// the bindings as the runtime delivered them.
 					return new target(orig_state, orig_env)
 				} else {
 					return new target(state, env)
 				}
 			}
 			const doObj = api_context.with(context, createDO)
+
+			// Method wrappers below `unwrap(thisArg)` to avoid recursive
+			// proxying — which means inside any DO method body, `this` is
+			// the raw instance, NOT the outer Proxy returned by
+			// `instrumentDurableObject`. So `this.env` is read off the raw
+			// instance, where the framework's `super(ctx, env)` stored it
+			// raw. The instance-Proxy's `prop === 'env'` rewrite never gets
+			// consulted, and env-binding instrumentation (service /
+			// DurableObject / KV / D1 bindings, traceparent injection on
+			// outgoing fetches/RPCs) silently no-ops.
+			//
+			// Fix: swap `this.env` on the RAW instance to the wrapped env
+			// AFTER the framework's constructor has finished its setup
+			// work (so anything Proxy-incompatible already ran against the
+			// raw env). All subsequent `this.env.X` reads — including from
+			// inside `unwrap`-stripped method bodies — see the wrapped env
+			// and benefit from full instrumentation.
+			//
+			// Same for `this.ctx` (so storage/Web-sockets-API access goes
+			// through `instrumentState`).
+			if (classStyle) {
+				try {
+					Object.defineProperty(doObj, 'env', {
+						value: env,
+						writable: true,
+						configurable: true,
+						enumerable: true,
+					})
+					Object.defineProperty(doObj, 'ctx', {
+						value: state,
+						writable: true,
+						configurable: true,
+						enumerable: true,
+					})
+				} catch {
+					// best-effort — if the framework froze these descriptors
+					// we can't swap them. Falls back to the legacy behavior
+					// where the instance Proxy redirects, but only for
+					// non-`unwrap`-stripped accesses.
+				}
+			}
 
 			return instrumentDurableObject(doObj, initialiser, env, state, classStyle)
 		},
