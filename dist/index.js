@@ -107,7 +107,7 @@ function passthroughGet(target, prop, thisArg) {
 
 // versions.json
 var _microlabs_otel_cf_workers = "1.0.0";
-var node = "22.17.0";
+var node = "24.15.0";
 
 // src/exporter.ts
 var defaultHeaders = {
@@ -223,8 +223,11 @@ var TraceState = class {
   }
   async exportSpans(spans) {
     await scheduler.wait(1);
+    const config = getActiveConfig();
+    const processed = config?.postProcessor ? config.postProcessor(spans) : spans;
+    if (processed.length === 0) return;
     const promise = new Promise((resolve, reject) => {
-      this.exporter.export(spans, (result) => {
+      this.exporter.export(processed, (result) => {
         if (result.code === ExportResultCode2.SUCCESS) {
           resolve();
         } else {

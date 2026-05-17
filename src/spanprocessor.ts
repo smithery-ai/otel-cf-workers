@@ -73,8 +73,18 @@ class TraceState {
 
 	private async exportSpans(spans: ReadableSpan[]): Promise<void> {
 		await scheduler.wait(1)
+		// Apply the user-supplied postProcessor (configured via TraceConfig)
+		// once per batch, right before export. Previously this hook was
+		// defined in the type surface but never invoked — consumers had
+		// to wrap the SpanExporter themselves to filter spans. With this
+		// in place, returning [] (or a filtered subset) from postProcessor
+		// is honored: empty batches short-circuit so the exporter doesn't
+		// see a zero-length export call.
+		const config = getActiveConfig()
+		const processed = config?.postProcessor ? config.postProcessor(spans) : spans
+		if (processed.length === 0) return
 		const promise = new Promise<void>((resolve, reject) => {
-			this.exporter.export(spans, (result) => {
+			this.exporter.export(processed, (result) => {
 				if (result.code === ExportResultCode.SUCCESS) {
 					resolve()
 				} else {
